@@ -23,7 +23,7 @@ pipenv install
 pipenv shell
 ```
 
-You can now type `./sparkyRecipValidate.py -h` and see usage info.
+You can now type `./MultiThreadRecipValidate.py -h` and see usage info.
 
 ## Pre-requisites
 

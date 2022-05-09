@@ -3,9 +3,12 @@
 import argparse, time, csv, requests, io
 from email_validator import validate_email, EmailNotValidError
 from common import eprint, getenv_check, getenv, hostCleanup
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests_futures.sessions import FuturesSession
 
 
-def validateRecipient(url, apiKey, recip, snooze):
+def validateRecipients(f, fh, apiKey, snooze, count):
     """
     Validate a single recipient. Allows for possible future rate-liming on this endpoint.
     :param url: SparkPost URL including the endpoint
@@ -14,28 +17,27 @@ def validateRecipient(url, apiKey, recip, snooze):
     :return: dict containing JSON-decode of response
     """
     h = {'Authorization': apiKey, 'Accept': 'application/json'}
-    thisReq = requests.compat.urljoin(url, recip)
-    # Allow for possible rate-limiting responses in future, even if not happening now
-    while True:
-        try:
-            response = requests.get(thisReq, timeout=60, headers=h)
-            if response.status_code == 200:
-                res = response.json()
-                if 'results' in res:
-                    return response.json()
-            # 200 empty reply, or other status code
-            eprint("Request", thisReq)
-            eprint('Error:', response.status_code, ':', response.text, "retrying")
-            eprint('.. pausing', snooze, 'seconds for rate-limiting')
-            time.sleep(snooze)
-            continue
-
-        except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout) as err:
-            eprint("Request", thisReq)
-            eprint('Exception:', err, "retrying")
-            eprint('.. pausing', snooze, 'seconds for rate-limiting')
-            time.sleep(snooze)
-            continue
+    session = FuturesSession()
+    with tqdm(total=count) as pbar:
+        for address in f:
+            for i in address:
+                thisReq = requests.compat.urljoin(url, i)
+                futures = [session.get(thisReq,headers=h)]
+                for future in as_completed(futures):
+                    resp = future.result()
+                    content = resp.json()
+                    if resp.status_code == 200:
+                        if content and 'results' in content:
+                            row = content['results']
+                            row['email'] = i
+                            fh.writerow(row)
+                        else:
+                            eprint('Error: response', content)
+                        pbar.update(1)
+                    else:
+                        print(resp.status_code)
+                        print('Snoozing before trying again')
+                        time.sleep(10)
 
 def processFile(infile, outfile, url, apiKey, snooze, skip_precheck):
     """
@@ -74,15 +76,12 @@ def processFile(infile, outfile, url, apiKey, snooze, skip_precheck):
     fList = ['email', 'valid', 'result', 'reason', 'is_role', 'is_disposable', 'is_free', 'did_you_mean']
     fh = csv.DictWriter(outfile, fieldnames=fList, restval='', extrasaction='ignore')
     fh.writeheader()
-    for r in f:
-        recip = r[0]
-        res = validateRecipient(url, apiKey, recip, snooze)
-        if res and 'results' in res:
-            row = res['results']
-            row['email'] = recip
-            fh.writerow(row)
-        else:
-            eprint('Error: response', res)
+
+    validateRecipients(f,fh,apiKey,snooze,count_ok)
+
+    infile.close()
+    outfile.close()
+    eprint('Done')
 
     infile.close()
     outfile.close()
@@ -106,7 +105,7 @@ parser.add_argument('-o', '--outfile', type=argparse.FileType('w'), default='-',
 parser.add_argument('--skip_precheck', action='store_true', help='Skip the precheck of input file email syntax')
 args = parser.parse_args()
 
-apiKey = getenv_check('SPARKPOST_API_KEY')                      # API key is mandatory
+apiKey = ''                     # API key is mandatory
 host = hostCleanup(getenv('SPARKPOST_HOST', default='api.sparkpost.com'))
 url = host + '/api/v1/recipient-validation/single/'
 
